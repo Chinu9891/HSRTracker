@@ -1,7 +1,9 @@
-# Tauri + React + Typescript
+# HSRTracker
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Honkai Star Rail wish tracker built in Rust as a learning project, with room to grow.
 
-## Recommended IDE Setup
+## Development
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+This project uses Tauri, React, TypeScript, and Vite.
+
+Recommended IDE setup: [VS Code](https://code.visualstudio.com/) with the [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) and [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer) extensions.
