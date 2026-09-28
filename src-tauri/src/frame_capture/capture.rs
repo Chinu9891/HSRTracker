@@ -1,14 +1,13 @@
 use image::{ImageBuffer, RgbaImage};
 use log::{error, info, warn};
-use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
-use std::sync::Mutex;
+use serde::{Serialize};
 use std::sync::atomic::AtomicI32;
-use tokio::sync::mpsc::{Receiver};
+use tokio::sync::mpsc::Receiver;
+use tokio::time::Instant;
 use windows::core::{Interface, Ref};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem,
+    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -24,45 +23,38 @@ use windows::Win32::System::WinRT::{
     DQTYPE_THREAD_CURRENT, RO_INIT_MULTITHREADED,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, GetMessageW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, TranslateMessage,
+    DispatchMessageW, FindWindowW, PeekMessageW, TranslateMessage,
+    MSG, PM_REMOVE,
 };
 
-use crate::frame_capture::error::FrameSessionError;
+use crate::frame_capture::error::{FrameSessionError, InitializationError};
 
 const ROI_X: u32 = 2560;
 const ROI_Y: u32 = 0;
 const ROI_HEIGHT: u32 = 520;
 const ROI_WIDTH: u32 = 520;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SessionResult {
-    pub uptime: u64,
+#[derive(Debug)]
+pub struct ReusableTextures {
+    roi_texture: ID3D11Texture2D,
+    staging_texture: ID3D11Texture2D,
 }
 
-pub enum FrameHandlerResult {
-    WindowClosed,
-    ProcessingFinished
+#[derive(Debug)]
+pub struct CaptureInitialization {
+    device_context: ID3D11DeviceContext,
+    textures: ReusableTextures,
+    pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
+    item: GraphicsCaptureItem,
 }
 
-pub async fn begin_session(
-    session_rx: &mut Receiver<bool>,
-) -> Result<SessionResult, FrameSessionError> {
-    unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(|e| {
-        error!("Error while initializing frame session: {e}");
-        FrameSessionError::InitializationError
-    })?;
-    unsafe {
-        CreateDispatcherQueueController(DispatcherQueueOptions {
-            dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
-            threadType: DQTYPE_THREAD_CURRENT,
-            apartmentType: DQTAT_COM_NONE,
-        })
-        .map_err(|e| {
-            error!("Error while initializing frame session: {e}");
-            FrameSessionError::InitializationError
-        })?;
-    };
+#[derive(Debug, Serialize, Clone)]
+pub struct CaptureResult {
+    uptime: u64,
+}
 
+pub fn initialize_capture() -> Result<CaptureInitialization, InitializationError> {
     let (device, device_context) = unsafe {
         let mut device = None;
         let mut context = None;
@@ -76,14 +68,10 @@ pub async fn begin_session(
             Some(&mut device),
             None,
             Some(&mut context),
-        )
-        .map_err(|e| {
-            error!("Error while initializing frame session: {e}");
-            FrameSessionError::InitializationError
-        })?;
+        )?;
         (
-            device.ok_or(FrameSessionError::InitializationError)?,
-            context.ok_or(FrameSessionError::InitializationError)?,
+            device.ok_or(InitializationError::DeviceInitialization)?,
+            context.ok_or(InitializationError::DeviceInitialization)?,
         )
     };
 
@@ -94,7 +82,7 @@ pub async fn begin_session(
         )
         .map_err(|e| {
             error!("Error while trying to find Honkai star rail's game window: {e}");
-            FrameSessionError::HsrNotFound
+            InitializationError::HsrNotFound
         })?
     };
 
@@ -135,11 +123,10 @@ pub async fn begin_session(
         };
 
         unsafe {
-            device
-                .CreateTexture2D(&roi_desc, None, Some(&mut texture))?;
+            device.CreateTexture2D(&roi_desc, None, Some(&mut texture))?;
         }
 
-        texture.ok_or(FrameSessionError::InitializationError)?
+        texture.ok_or(InitializationError::TextureInitialization)?
     };
 
     let staging_texture = {
@@ -162,26 +149,56 @@ pub async fn begin_session(
         };
 
         unsafe {
-            device
-                .CreateTexture2D(&staging_desc, None, Some(&mut texture))?;
+            device.CreateTexture2D(&staging_desc, None, Some(&mut texture))?;
         }
 
-        texture.ok_or(FrameSessionError::InitializationError)?
+        texture.ok_or(InitializationError::TextureInitialization)?
     };
 
-    session.SetIsBorderRequired(false)?;
-    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<FrameHandlerResult>();
-    let closed_tx_clone = closed_tx.clone();
+    Ok(CaptureInitialization {
+        device_context,
+        pool,
+        session,
+        textures: ReusableTextures {
+            roi_texture,
+            staging_texture,
+        },
+        item,
+    })
+}
 
-    item.Closed(&TypedEventHandler::new(
+pub async fn begin_capture(
+    session_rx: &mut Receiver<bool>,
+    initialized: CaptureInitialization,
+) -> Result<CaptureResult, FrameSessionError> {
+    unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(|e| {
+        error!("Error while initializing frame session: {e}");
+        FrameSessionError::InitializationError
+    })?;
+    unsafe {
+        CreateDispatcherQueueController(DispatcherQueueOptions {
+            dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
+            threadType: DQTYPE_THREAD_CURRENT,
+            apartmentType: DQTAT_COM_NONE,
+        })
+        .map_err(|e| {
+            error!("Error while initializing frame session: {e}");
+            FrameSessionError::InitializationError
+        })?;
+    };
+
+    initialized.session.SetIsBorderRequired(false)?;
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<i32>();
+
+    initialized.item.Closed(&TypedEventHandler::new(
         move |_event: Ref<'_, GraphicsCaptureItem>, _| {
-            let _ = closed_tx_clone.send(FrameHandlerResult::WindowClosed);
+            let _ = closed_tx.send(1);
             Ok(())
         },
     ))?;
-    
+
     let i = AtomicI32::new(1);
-    pool.FrameArrived(&TypedEventHandler::new(
+    initialized.pool.FrameArrived(&TypedEventHandler::new(
         move |sender: Ref<'_, Direct3D11CaptureFramePool>, _| {
             let sender = sender.unwrap();
             let frame = sender.TryGetNextFrame()?;
@@ -202,8 +219,8 @@ pub async fn begin_session(
             };
 
             unsafe {
-                device_context.CopySubresourceRegion(
-                    &roi_texture,
+                initialized.device_context.CopySubresourceRegion(
+                    &initialized.textures.roi_texture,
                     0,
                     0,
                     0,
@@ -215,12 +232,15 @@ pub async fn begin_session(
             }
 
             unsafe {
-                device_context.CopyResource(&staging_texture, &roi_texture);
+                initialized.device_context.CopyResource(
+                    &initialized.textures.staging_texture,
+                    &initialized.textures.roi_texture,
+                );
             }
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             unsafe {
-                device_context.Map(
-                    &staging_texture,
+                initialized.device_context.Map(
+                    &initialized.textures.staging_texture,
                     0,
                     D3D11_MAP_READ,
                     0,
@@ -240,7 +260,9 @@ pub async fn begin_session(
             }
 
             unsafe {
-                device_context.Unmap(&staging_texture, 0);
+                initialized
+                    .device_context
+                    .Unmap(&initialized.textures.staging_texture, 0);
             }
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
@@ -260,8 +282,9 @@ pub async fn begin_session(
             Ok(())
         },
     ))?;
+
     let now = Instant::now();
-    session.StartCapture()?;
+    initialized.session.StartCapture()?;
 
     let mut pump_tick =
         tokio::time::interval(std::time::Duration::from_millis(10));
@@ -274,7 +297,7 @@ pub async fn begin_session(
                     .as_bool()
                 {
                     unsafe {
-                        TranslateMessage(&msg);
+                        let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
                 }
@@ -284,10 +307,10 @@ pub async fn begin_session(
         }
     }
 
-    session.Close()?;
+    initialized.session.Close()?;
     let uptime = Instant::now() - now;
 
-    Ok(SessionResult {
+    Ok(CaptureResult {
         uptime: uptime.as_secs(),
     })
 }

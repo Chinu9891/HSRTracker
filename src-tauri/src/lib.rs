@@ -1,19 +1,46 @@
+use crate::frame_capture::{
+    capture::initialize_capture,
+    error::InitializationError,
+    handler::{session_orchestrator, OrchestratorMessage},
+};
 use log::error;
 use tauri::State;
 use tokio::sync::mpsc::Sender;
-use crate::frame_capture::handler::{OrchestratorMessage, session_orchestrator};
 
 mod frame_capture;
 
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+async fn start_capture(
+    orchestrator_tx: State<'_, Sender<OrchestratorMessage>>,
+) -> Result<(), String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel::<Result<(), InitializationError>>();
 
-#[tauri::command]
-async fn start_capture(orchestrator_tx: State<'_, Sender<OrchestratorMessage>>) -> Result<(), ()> {
-    let _ = orchestrator_tx.send(OrchestratorMessage::BeginCapture).await;
-    Ok(())
+    let _ = orchestrator_tx
+        .send(OrchestratorMessage::BeginCapture(sender))
+        .await;
+
+    tokio::select! {
+        _ = tokio::time::sleep(tokio::time::Duration::from_millis(100000)) => {
+            return Err("Unexpected error while capture initialization. Please try again.".to_string());
+        },
+        initialization_result = receiver => {
+            let Ok(result) = initialization_result else {
+                return Err("Unexpected error".to_string());
+            };
+
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) => match e {
+                    InitializationError::HsrNotFound => { 
+                        return Err("HSR is not open. Please start it before starting capture.".to_string())
+                    },
+                    _ => {
+                        return Err("Unexpected initialization error. Please try again.".to_string())
+                    }
+                }
+            }
+        }
+    };
 }
 
 #[tauri::command]
@@ -38,9 +65,8 @@ pub fn run() {
 
                 let local = tokio::task::LocalSet::new();
 
-                let k = runtime.block_on(local.run_until(
-                    session_orchestrator(app_handle, &mut receiver)
-                ));
+                let k = runtime
+                    .block_on(local.run_until(session_orchestrator(app_handle, &mut receiver)));
 
                 if let Err(e) = k {
                     error!("Orchestrator error: {e:?}");
@@ -50,7 +76,7 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, start_capture, end_capture])
+        .invoke_handler(tauri::generate_handler![start_capture, end_capture])
         .manage(sender)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

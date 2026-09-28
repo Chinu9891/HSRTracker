@@ -14,8 +14,11 @@ function App() {
   async function startCapture() {
     setUptime(null);
     setErr(null);
-    setCapturing(true);
-    await invoke("start_capture");
+    await invoke("start_capture").then(() => {
+      setCapturing(true);
+    }).catch((e: string) => {
+      setErr(e);
+    });
   }
 
   async function stopCapture() {

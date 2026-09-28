@@ -1,6 +1,5 @@
 use crate::frame_capture::{
-    capture::{begin_session},
-    error::FrameSessionError
+    capture::{CaptureInitialization, begin_capture, initialize_capture}, error::{FrameSessionError, InitializationError}
 };
 use log::{error, info, warn};
 use tauri::{AppHandle, Emitter};
@@ -14,9 +13,9 @@ pub enum OrchestratorError {
     DeviceInitialization,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug)]
 pub enum OrchestratorMessage {
-    BeginCapture,
+    BeginCapture(tokio::sync::oneshot::Sender<Result<(), InitializationError>>),
     StopCapture,
 }
 
@@ -25,7 +24,7 @@ pub async fn session_orchestrator(
     orchestrator_recv: &mut Receiver<OrchestratorMessage>,
 ) -> Result<(), OrchestratorError> {
     loop {
-        tokio::select! {
+        let session = tokio::select! {
             msg = orchestrator_recv.recv() => {
                 let Some(message) = msg else {
                     warn!("All channels closed; quitting handler");
@@ -33,7 +32,20 @@ pub async fn session_orchestrator(
                 };
 
                 match message {
-                    OrchestratorMessage::BeginCapture => {},
+                    OrchestratorMessage::BeginCapture(sender) => {
+                        let session = initialize_capture();
+
+                        match session {
+                            Ok(session) => {
+                                sender.send(Ok(())).unwrap();
+                                session
+                            },
+                            Err(e) => {
+                                sender.send(Err(e)).unwrap();
+                                continue;
+                            }
+                        }
+                    },
                     OrchestratorMessage::StopCapture => {
                         warn!("Received Stop signal when no capture session is active; skipping");
                         continue;
@@ -46,7 +58,7 @@ pub async fn session_orchestrator(
         };
 
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<bool>(1);
-        let session = begin_session(&mut stop_rx);
+        let session = begin_capture(&mut stop_rx, session);
         tokio::pin!(session);
 
         loop {
@@ -60,7 +72,7 @@ pub async fn session_orchestrator(
                         }
                         Err(e) => {
                             let msg = match e {
-                                FrameSessionError::HsrNotFound => "adkjfh",
+                                FrameSessionError::HsrNotFound => "Hsr window not found",
                                 _ => "initialization error"
                             };
                             if let Err(e) = app.emit("session_err", msg) {
@@ -77,9 +89,7 @@ pub async fn session_orchestrator(
                         Some(OrchestratorMessage::StopCapture) => {
                             let _ = stop_tx.send(true).await;
                         }
-                        Some(OrchestratorMessage::BeginCapture) => {
-                            warn!("Capture is already running");
-                        }
+                        Some(_) => unreachable!("Unexpected state"),
                         None => {
                             let _ = stop_tx.send(true).await;
                             let _ = session.await;

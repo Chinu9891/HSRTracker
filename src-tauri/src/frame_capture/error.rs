@@ -9,3 +9,17 @@ impl From<windows::core::Error> for FrameSessionError {
         FrameSessionError::InitializationError
     }
 }
+
+#[derive(Debug)]
+pub enum InitializationError {
+    HsrNotFound,
+    DeviceInitialization,
+    TextureInitialization,
+    Other(windows::core::Error)
+}
+
+impl From<windows::core::Error> for InitializationError {
+    fn from(value: windows::core::Error) -> Self {
+        InitializationError::Other(value)
+    }
+}
