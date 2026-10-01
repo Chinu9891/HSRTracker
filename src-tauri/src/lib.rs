@@ -8,6 +8,7 @@ use tauri::State;
 use tokio::sync::mpsc::Sender;
 
 mod frame_capture;
+mod ocr_engine;
 
 #[tauri::command]
 async fn start_capture(

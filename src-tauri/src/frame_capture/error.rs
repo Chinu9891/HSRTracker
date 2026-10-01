@@ -1,7 +1,6 @@
 #[derive(Debug)]
 pub enum FrameSessionError {
     InitializationError,
-    HsrNotFound,
 }
 
 impl From<windows::core::Error> for FrameSessionError {
@@ -15,6 +14,7 @@ pub enum InitializationError {
     HsrNotFound,
     DeviceInitialization,
     TextureInitialization,
+    DuplicateRequest,
     Other(windows::core::Error)
 }
 

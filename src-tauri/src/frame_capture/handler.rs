@@ -1,28 +1,21 @@
 use crate::frame_capture::{
-    capture::{CaptureInitialization, begin_capture, initialize_capture}, error::{FrameSessionError, InitializationError}
+    capture::{begin_capture, initialize_capture},
+    error::{FrameSessionError, InitializationError},
 };
 use log::{error, info, warn};
 use tauri::{AppHandle, Emitter};
-use tokio::{
-    sync::mpsc::{Receiver},
-};
-
-#[derive(Debug)]
-pub enum OrchestratorError {
-    Fatal,
-    DeviceInitialization,
-}
+use tokio::sync::{mpsc::Receiver, oneshot::Sender};
 
 #[derive(Debug)]
 pub enum OrchestratorMessage {
-    BeginCapture(tokio::sync::oneshot::Sender<Result<(), InitializationError>>),
+    BeginCapture(Sender<Result<(), InitializationError>>),
     StopCapture,
 }
 
 pub async fn session_orchestrator(
     app: AppHandle,
     orchestrator_recv: &mut Receiver<OrchestratorMessage>,
-) -> Result<(), OrchestratorError> {
+) -> Result<(), ()> {
     loop {
         let session = tokio::select! {
             msg = orchestrator_recv.recv() => {
@@ -33,16 +26,21 @@ pub async fn session_orchestrator(
 
                 match message {
                     OrchestratorMessage::BeginCapture(sender) => {
-                        let session = initialize_capture();
-
-                        match session {
-                            Ok(session) => {
-                                sender.send(Ok(())).unwrap();
-                                session
+                        match initialize_capture() {
+                            Ok(init) => {
+                                // early return fine here since `begin_capture` will emit an error event if it fails to start
+                                if sender.send(Ok(())).is_err() {
+                                    error!("All channels closed. Exiting");
+                                    break;
+                                }
+                                init
                             },
                             Err(e) => {
-                                sender.send(Err(e)).unwrap();
-                                continue;
+                                if sender.send(Err(e)).is_err() {
+                                    error!("All channels closed. Exiting");
+                                    break;
+                                }
+                                continue
                             }
                         }
                     },
@@ -72,8 +70,7 @@ pub async fn session_orchestrator(
                         }
                         Err(e) => {
                             let msg = match e {
-                                FrameSessionError::HsrNotFound => "Hsr window not found",
-                                _ => "initialization error"
+                                FrameSessionError::InitializationError => "initialization error",
                             };
                             if let Err(e) = app.emit("session_err", msg) {
                                 error!("Could not emit session result: {e}");
@@ -88,8 +85,16 @@ pub async fn session_orchestrator(
                     match message {
                         Some(OrchestratorMessage::StopCapture) => {
                             let _ = stop_tx.send(true).await;
+                            continue;
                         }
-                        Some(_) => unreachable!("Unexpected state"),
+                        Some(OrchestratorMessage::BeginCapture(sender)) => {
+                            info!("Received begin capture request while one is already active; no-op");
+                            if sender.send(Err(InitializationError::DuplicateRequest)).is_err() {
+                                error!("All channels closed. Exiting");
+                                return Ok(());
+                            }
+                            continue;
+                        },
                         None => {
                             let _ = stop_tx.send(true).await;
                             let _ = session.await;
